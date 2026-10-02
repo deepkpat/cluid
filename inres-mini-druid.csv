@@ -1,0 +1,2 @@
+target,total_events,batch_size,concurrency,elapsed_sec,events_per_sec,p50_batch_ms,p95_batch_ms,mean_batch_ms,errors,notes
+druid,20000,10000,1,41.08,486.8,20541.7,20541.7,20541.7,0,native-batch index_parallel task=index_parallel_events_ppklfmip_2026-10-02T09:21:51.697Z files=2

@@ -1,0 +1,211 @@
+name: ingestion-bench
+
+# Run ONE target at a time (limited resources):
+#   docker compose --profile clickhouse up -d   # ClickHouse only
+#   docker compose --profile druid up -d        # Druid only
+#   docker compose --profile clickhouse down    # free resources before switching
+#   docker compose --profile druid down
+#
+# main.go does this automatically when docker.manage=true (default):
+# it brings targets up sequentially, benchmarks, then tears down
+# before starting the next one.
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    container_name: ingestion-bench-clickhouse
+    profiles: ["clickhouse"]
+    # The image disables network access for the password-less default user,
+    # so create a dedicated user (host connects through the published port).
+    environment:
+      - CLICKHOUSE_DB=bench
+      - CLICKHOUSE_USER=bench
+      - CLICKHOUSE_PASSWORD=benchpass
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # native
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # Resource cap so the box stays usable. Tune in config.yaml-adjacent way
+    # by editing these values (also see docker.resources in config.yaml docs).
+    cpus: 4.0
+    mem_limit: 4g
+    mem_reservation: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  # ---- Druid (multi-container; profile "druid") ----
+  # The apache/druid image has no perl, so the supervise-based single-container
+  # micro-quickstart cannot run. Instead each service runs in its own container
+  # via the image entrypoint (/druid.sh) with the micro-quickstart config
+  # (DRUID_SINGLE_NODE_CONF) and a shared /opt/druid/var volume for segments.
+  # Never run alongside ClickHouse on small machines (see main.go: sequential).
+  # Shared env for all druid services:
+  #   DRUID_SINGLE_NODE_CONF=micro-quickstart, druid_zk_service_host=zk
+  #   druid_host=<container name> (explicit: the image lacks `ip`, so druid.sh
+  #   cannot auto-detect the announce address)
+
+  zk:
+    image: zookeeper:3.5.10
+    container_name: ingestion-bench-zk
+    profiles: ["druid"]
+    cpus: 0.5
+    mem_limit: 512m
+
+  druid-metadata:
+    image: postgres:16-alpine
+    container_name: ingestion-bench-druid-metadata
+    profiles: ["druid"]
+    environment:
+      - POSTGRES_DB=druid
+      - POSTGRES_USER=druid
+      - POSTGRES_PASSWORD=druid
+    cpus: 0.5
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U druid -d druid"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  druid-coordinator:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-coordinator
+    profiles: ["druid"]
+    command: ["coordinator"]
+    user: root # writes to the shared volume (root-owned on first mount)
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-coordinator
+      - DRUID_CONFIG_COMMON=/druid-conf/druid-common-runtime.properties
+    volumes:
+      - druid_var:/opt/druid/var
+      - ./druid-conf/druid-common-runtime.properties:/druid-conf/druid-common-runtime.properties:ro
+    depends_on:
+      - zk
+      - druid-metadata
+    cpus: 1.0
+    mem_limit: 768m
+
+  druid-overlord:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-overlord
+    profiles: ["druid"]
+    command: ["overlord"]
+    user: root # writes to the shared volume (root-owned on first mount)
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-overlord
+      - DRUID_CONFIG_COMMON=/druid-conf/druid-common-runtime.properties
+    volumes:
+      - druid_var:/opt/druid/var
+      - ./druid-conf/druid-common-runtime.properties:/druid-conf/druid-common-runtime.properties:ro
+    depends_on:
+      - zk
+      - druid-metadata
+    cpus: 1.0
+    mem_limit: 768m
+
+  druid-broker:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-broker
+    profiles: ["druid"]
+    command: ["broker"]
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-broker
+    depends_on:
+      - zk
+    cpus: 1.0
+    mem_limit: 1g
+
+  druid-router:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-router
+    profiles: ["druid"]
+    command: ["router"]
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-router
+    ports:
+      - "8888:8888"   # router: query + ingestion API (main.go endpoint)
+    depends_on:
+      - zk
+    cpus: 0.5
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8888/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 120s
+
+  druid-historical:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-historical
+    profiles: ["druid"]
+    command: ["historical"]
+    user: root # writes to the shared volume (root-owned on first mount)
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-historical
+    volumes:
+      - druid_var:/opt/druid/var
+    depends_on:
+      - zk
+    cpus: 1.0
+    mem_limit: 1g
+
+  druid-middlemanager:
+    image: apache/druid:34.0.0
+    container_name: ingestion-bench-druid-middlemanager
+    profiles: ["druid"]
+    command: ["middleManager"]
+    user: root # peons write task dirs to the shared volume
+    environment:
+      - DRUID_SINGLE_NODE_CONF=micro-quickstart
+      - druid_zk_service_host=zk
+      - druid_host=ingestion-bench-druid-middlemanager
+      - DRUID_CONFIG_middleManager=/druid-conf/middleManager-runtime.properties
+    volumes:
+      - druid_var:/opt/druid/var
+      - ./druid-conf/middleManager-runtime.properties:/druid-conf/middleManager-runtime.properties:ro
+      - ./druid-input:/druid-input:ro
+    # Lets peons fall back to the Go helper file server on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - zk
+    cpus: 2.0
+    mem_limit: 2g
+
+  # Serves the NDJSON input files main.go writes to ./druid-input/ so the
+  # Druid container can fetch them over the compose network (reliable on
+  # Docker Desktop, where container->host networking is flaky).
+  # Same profile => starts/stops together with druid, never with ClickHouse.
+  fileserver:
+    image: busybox:latest
+    container_name: ingestion-bench-fileserver
+    profiles: ["druid"]
+    command: ["httpd", "-f", "-p", "8080", "-h", "/data"]
+    volumes:
+      - ./druid-input:/data:ro
+    cpus: 0.25
+    mem_limit: 64m
+
+volumes:
+  clickhouse_data:
+  druid_var:   # shared /opt/druid/var: segments, indexing logs, task dirs

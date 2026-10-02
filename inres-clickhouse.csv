@@ -1,0 +1,2 @@
+target,total_events,batch_size,concurrency,elapsed_sec,events_per_sec,p50_batch_ms,p95_batch_ms,mean_batch_ms,errors,notes
+clickhouse,500000,10000,4,4.01,124603.0,147.8,201.1,152.5,0,http INSERT FORMAT JSONEachRow

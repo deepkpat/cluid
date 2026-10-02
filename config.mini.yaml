@@ -1,0 +1,51 @@
+# Small smoke-test config — validates the full pipeline end-to-end in ~1-2 min
+# (plus Druid container startup) before running the full config.yaml.
+#
+# Run from the ingestion-bench dir itself:
+#   go run . --config config.mini.yaml --out inres-mini.csv
+# Single engine:
+#   go run . --config config.mini.yaml --out inres-mini.csv --only clickhouse
+#   go run . --config config.mini.yaml --out inres-mini.csv --only druid
+
+dataset:
+  total_events: 20000
+  batch_size: 2000
+  seed: 42
+  start_time: "2026-01-01T00:00:00Z"
+  span_days: 2
+
+bench:
+  concurrency: 2
+  timeout_seconds: 600
+  druid_max_num_concurrent_subtasks: 1
+  druid_segment_granularity: "DAY"
+  druid_rows_per_file: 10000
+  helper_host_candidates:
+    - "host.docker.internal"
+    - "172.17.0.1"
+    - "172.18.0.1"
+  helper_port: 18089
+
+targets:
+  - name: clickhouse
+    enabled: true
+    endpoint: "http://localhost:8123"
+    database: "bench"
+    table: "events"
+    user: "bench"
+    password: "benchpass"
+  - name: druid
+    enabled: true
+    endpoint: "http://localhost:8888"
+    datasource: "events"
+
+docker:
+  manage: true
+  # Resolved relative to the config file's dir if not found as-is,
+  # so this works both from the repo root and from ingestion-bench/.
+  compose_file: "docker-compose.yml"
+  down_after_each: true
+  ready_timeout_seconds: 300
+  resources:
+    clickhouse: { cpus: 4.0, memory: "4g" }
+    druid: { cpus: 4.0, memory: "6g" }

@@ -1,0 +1,65 @@
+# Ingestion benchmark config.
+# Usage:
+#   go run ingestion-bench/main.go --config ingestion-bench/config.yaml --out inres.csv
+#   # run only one engine (useful on small boxes):
+#   go run ingestion-bench/main.go --config ingestion-bench/config.yaml --out inres.csv --only clickhouse
+#   go run ingestion-bench/main.go --config ingestion-bench/config.yaml --out inres.csv --only druid
+
+dataset:
+  # Medium-complexity e-commerce/telemetry event (~20 cols: times, low-card
+  # dims, high-card ids, numeric metrics, geo). See main.go Event struct.
+  total_events: 500000
+  batch_size: 10000        # rows per INSERT (CH) / rows per file chunk (Druid)
+  seed: 42
+  # Event timestamps are spread over this many days starting at start_time.
+  start_time: "2026-01-01T00:00:00Z"
+  span_days: 7
+
+bench:
+  concurrency: 4           # parallel HTTP INSERT workers for ClickHouse
+  timeout_seconds: 1800
+  # Druid native-batch tuning (index_parallel task):
+  druid_max_num_concurrent_subtasks: 2
+  druid_segment_granularity: "DAY"
+  # Number of NDJSON files the Go helper HTTP server exposes to Druid's
+  # http inputSource. Files = ceil(total_events / druid_rows_per_file).
+  druid_rows_per_file: 50000
+  # Port for the ephemeral file server Druid pulls input data from.
+  # Must be reachable from the druid container (host.docker.internal on
+  # Docker Desktop; 172.17.0.1 / host gateway on Linux — main.go tries both).
+  helper_host_candidates:
+    - "host.docker.internal"
+    - "172.17.0.1"
+    - "172.18.0.1"
+  helper_port: 18089
+
+targets:
+  - name: clickhouse
+    enabled: true
+    # HTTP interface of the compose service above.
+    endpoint: "http://localhost:8123"
+    database: "bench"
+    table: "events"
+    user: "bench"
+    password: "benchpass"
+  - name: druid
+    enabled: true
+    # Router endpoint of the compose service above.
+    endpoint: "http://localhost:8888"
+    datasource: "events"
+
+docker:
+  # When true, main.go runs `docker compose up/down` per target SEQUENTIALLY
+  # so only one engine occupies RAM/CPU at a time. Set false if you manage
+  # containers manually (e.g. `docker compose --profile clickhouse up -d`).
+  manage: true
+  compose_file: "ingestion-bench/docker-compose.yml"
+  # Tear the profile down after its benchmark finishes (frees RAM for next).
+  down_after_each: true
+  # Seconds to wait for /ping (CH) or /status (Druid) before giving up.
+  ready_timeout_seconds: 300
+  # Resource limits are enforced in docker-compose.yml (cpus/mem_limit).
+  # Documented here for visibility:
+  resources:
+    clickhouse: { cpus: 4.0, memory: "4g" }
+    druid: { cpus: 4.0, memory: "6g" }
